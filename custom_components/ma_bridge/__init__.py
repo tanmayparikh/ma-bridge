@@ -210,7 +210,7 @@ async def ws_recommendations(hass: HomeAssistant, connection: websocket_api.Acti
         connection.send_error(msg["id"], "music_assistant_error", str(err))
         return
     folders = [f for f in (_plain(f) for f in folders or []) if isinstance(f, dict)]
-    # Newer Music Assistant versions send each row empty, to be filled by browsing its path.
+    # Rows can arrive empty; each is filled with its own call, all at once.
     contents = await asyncio.gather(*(_folder_items(mass, f) for f in folders), return_exceptions=True)
     rows = []
     errors = []
@@ -243,14 +243,19 @@ async def ws_recommendations(hass: HomeAssistant, connection: websocket_api.Acti
 
 
 async def _folder_items(mass, folder: dict[str, Any]) -> list[Any]:
-    """A row's items: inline if Music Assistant sent them, else by browsing the row's path."""
+    """A row's items. Older Music Assistant versions send them with the row; 2.10+ sends rows
+    empty and serves each row's items from ``music/recommendations/items``."""
     if folder.get("items"):
         return list(folder["items"])
-    path = folder.get("path") or folder.get("uri")
-    if not path:
+    provider, item_id = folder.get("provider"), folder.get("item_id")
+    if not provider or not item_id:
         return []
-    result = await mass.send_command("music/browse", path=path)
-    if isinstance(result, dict):  # some versions page results
+    try:
+        result = await mass.send_command("music/recommendations/items", provider=provider, item_id=item_id)
+    except Exception:  # noqa: BLE001 - versions without the command: the provider's browse route
+        _LOGGER.debug("music/recommendations/items failed for %s; browsing instead", item_id, exc_info=True)
+        result = await mass.send_command("music/browse", path=f"{provider}://recommendations/{item_id}")
+    if isinstance(result, dict):  # paged results
         result = result.get("items") or []
     return list(result or [])
 
