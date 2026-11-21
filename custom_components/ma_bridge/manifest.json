@@ -1,4 +1,4 @@
-﻿{
+{
   "domain": "ma_bridge",
   "name": "Music Assistant Bridge",
   "after_dependencies": ["music_assistant"],
