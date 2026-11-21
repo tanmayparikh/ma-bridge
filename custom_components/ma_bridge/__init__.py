@@ -14,9 +14,11 @@ It reuses the Music Assistant integration's own connection; it has no settings o
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
+import time
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -29,7 +31,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DATA_SECRET, DOMAIN, IMAGE_PATH, IMAGE_SIZE, MA_DOMAIN
+from .const import CACHE_SECONDS, DATA_SECRET, DOMAIN, IMAGE_PATH, IMAGE_SIZE, MA_DOMAIN, ROW_LIMIT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -195,17 +197,28 @@ async def ws_recommendations(hass: HomeAssistant, connection: websocket_api.Acti
     if mass is None:
         connection.send_error(msg["id"], "not_found", "Music Assistant isn't loaded")
         return
+    # Filling every row takes a call per row, some to streaming services: reuse it for a while.
+    cache = hass.data[DOMAIN].setdefault("cache", {})
+    key = msg.get("config_entry_id")
+    hit = cache.get(key)
+    if hit and not msg["debug"] and time.monotonic() - hit[0] < CACHE_SECONDS:
+        connection.send_result(msg["id"], hit[1])
+        return
     try:
         folders = await mass.send_command("music/recommendations")
     except Exception as err:  # noqa: BLE001 - report Music Assistant's error to the caller
         connection.send_error(msg["id"], "music_assistant_error", str(err))
         return
+    folders = [f for f in (_plain(f) for f in folders or []) if isinstance(f, dict)]
+    # Newer Music Assistant versions send each row empty, to be filled by browsing its path.
+    contents = await asyncio.gather(*(_folder_items(mass, f) for f in folders), return_exceptions=True)
     rows = []
-    for folder in folders or []:
-        folder = _plain(folder)
-        if not isinstance(folder, dict):
+    errors = []
+    for folder, raw_items in zip(folders, contents):
+        if isinstance(raw_items, BaseException):
+            errors.append({"folder": folder.get("item_id"), "path": folder.get("path"), "error": repr(raw_items)})
             continue
-        items = [i for i in (_item(hass, mass, _plain(raw)) for raw in folder.get("items") or []) if i]
+        items = [i for i in (_item(hass, mass, _plain(raw)) for raw in raw_items) if i][:ROW_LIMIT]
         if not items:
             continue
         rows.append({
@@ -215,12 +228,31 @@ async def ws_recommendations(hass: HomeAssistant, connection: websocket_api.Acti
             "subtitle": folder.get("subtitle"),
             "translation_key": folder.get("translation_key"),
             "icon": folder.get("icon"),
+            "enabled_by_default": folder.get("enabled_by_default", True),
             "items": items,
         })
     result: dict[str, Any] = {"rows": rows}
+    if rows:
+        cache[key] = (time.monotonic(), result)
     if msg["debug"]:
-        result["debug"] = _shape(folders)
+        result["debug"] = _shape(folders) | {
+            "paths": [{"id": f.get("item_id"), "path": f.get("path"), "uri": f.get("uri"), "enabled_by_default": f.get("enabled_by_default")} for f in folders],
+            "errors": errors,
+        }
     connection.send_result(msg["id"], result)
+
+
+async def _folder_items(mass, folder: dict[str, Any]) -> list[Any]:
+    """A row's items: inline if Music Assistant sent them, else by browsing the row's path."""
+    if folder.get("items"):
+        return list(folder["items"])
+    path = folder.get("path") or folder.get("uri")
+    if not path:
+        return []
+    result = await mass.send_command("music/browse", path=path)
+    if isinstance(result, dict):  # some versions page results
+        result = result.get("items") or []
+    return list(result or [])
 
 
 @websocket_api.websocket_command({
