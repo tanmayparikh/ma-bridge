@@ -371,7 +371,12 @@ async def ws_queue_items(hass: HomeAssistant, connection: websocket_api.ActiveCo
         return
     ok, items = await _send(connection, msg, mass, "player_queues/items", queue_id=msg["queue_id"], limit=msg["limit"], offset=msg["offset"])
     if ok:
-        connection.send_result(msg["id"], {"items": [i for i in (_queue_item(hass, mass, raw) for raw in items or []) if i]})
+        out = []
+        for n, raw in enumerate(items or []):
+            if item := _queue_item(hass, mass, raw):
+                item["index"] = msg["offset"] + n  # Music Assistant leaves QueueItem.index at 0
+                out.append(item)
+        connection.send_result(msg["id"], {"items": out})
 
 
 ITEM = vol.Any(str, int)  # a queue_item_id, or an index in the queue
