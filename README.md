@@ -1,4 +1,4 @@
-# Music Assistant Bridge
+﻿# Music Assistant Bridge
 
 A small Home Assistant integration that gives dashboards two things the built-in
 Music Assistant integration doesn't:
@@ -15,9 +15,9 @@ It reuses the Music Assistant integration's connection, so it has no settings.
 ## Install
 
 1. Copy `custom_components/ma_bridge` into your Home Assistant `config/custom_components`
-   folder (or add this repository to HACS as a custom integration repository).
+   folder (or in HACS: Custom repositories → `https://github.com/tanmayparikh/ma-bridge`, type Integration).
 2. Restart Home Assistant.
-3. Settings → Devices & services → Add integration → **Music Assistant Bridge**.
+3. Settings â†’ Devices & services â†’ Add integration â†’ **Music Assistant Bridge**.
 
 Needs the Music Assistant integration set up and loaded.
 

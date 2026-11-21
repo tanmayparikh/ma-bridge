@@ -1,14 +1,14 @@
-{
+﻿{
   "domain": "ma_bridge",
   "name": "Music Assistant Bridge",
   "after_dependencies": ["music_assistant"],
-  "codeowners": ["@tanmay"],
+  "codeowners": ["@tanmayparikh"],
   "config_flow": true,
   "dependencies": ["http", "websocket_api"],
-  "documentation": "https://git.olympuslabs.co/tanmay/ma-bridge",
+  "documentation": "https://github.com/tanmayparikh/ma-bridge",
   "integration_type": "service",
   "iot_class": "local_push",
-  "issue_tracker": "https://git.olympuslabs.co/tanmay/ma-bridge/issues",
+  "issue_tracker": "https://github.com/tanmayparikh/ma-bridge/issues",
   "requirements": [],
   "single_config_entry": true,
   "version": "0.1.0"
