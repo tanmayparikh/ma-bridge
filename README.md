@@ -32,7 +32,8 @@ Any logged-in user can call these.
 ```
 
 Optional `config_entry_id` picks a Music Assistant instance; the first loaded one is used
-otherwise. Returns:
+otherwise. `"debug": true` adds a `debug` key describing what Music Assistant sent back (folder
+names, item counts and a couple of sample items), for when rows come back empty. Returns:
 
 ```json
 {

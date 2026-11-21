@@ -148,9 +148,42 @@ def _item(hass: HomeAssistant, mass, raw: dict[str, Any]) -> dict[str, Any] | No
 # --- Websocket commands -----------------------------------------------------------------------
 
 
+def _plain(obj: Any) -> Any:
+    """Music Assistant models as plain dicts (the client may hand back either)."""
+    return obj.to_dict() if hasattr(obj, "to_dict") else obj
+
+
+def _shape(folders: Any) -> dict[str, Any]:
+    """What Music Assistant returned, without the bulk: for working out why rows come back empty."""
+    out: dict[str, Any] = {"type": type(folders).__name__}
+    if not isinstance(folders, list):
+        out["keys"] = sorted(folders.keys()) if isinstance(folders, dict) else None
+        return out
+    out["folders"] = []
+    for f in folders[:20]:
+        info: dict[str, Any] = {"type": type(f).__name__}
+        f = _plain(f)
+        if isinstance(f, dict):
+            items = f.get("items") or []
+            info.update({k: f.get(k) for k in ("name", "item_id", "provider", "media_type")})
+            info["keys"] = sorted(f.keys())
+            info["items"] = len(items)
+            info["sample"] = []
+            for i in items[:2]:
+                kind = type(i).__name__
+                i = _plain(i)
+                info["sample"].append(
+                    {"type": kind, "keys": sorted(i.keys()), **{k: i.get(k) for k in ("media_type", "uri", "name")}}
+                    if isinstance(i, dict) else {"type": kind}
+                )
+        out["folders"].append(info)
+    return out
+
+
 @websocket_api.websocket_command({
     vol.Required("type"): "ma_bridge/recommendations",
     vol.Optional("config_entry_id"): str,
+    vol.Optional("debug", default=False): bool,
 })
 @websocket_api.async_response
 async def ws_recommendations(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
@@ -169,9 +202,10 @@ async def ws_recommendations(hass: HomeAssistant, connection: websocket_api.Acti
         return
     rows = []
     for folder in folders or []:
+        folder = _plain(folder)
         if not isinstance(folder, dict):
             continue
-        items = [i for i in (_item(hass, mass, raw) for raw in folder.get("items") or []) if i]
+        items = [i for i in (_item(hass, mass, _plain(raw)) for raw in folder.get("items") or []) if i]
         if not items:
             continue
         rows.append({
@@ -183,7 +217,10 @@ async def ws_recommendations(hass: HomeAssistant, connection: websocket_api.Acti
             "icon": folder.get("icon"),
             "items": items,
         })
-    connection.send_result(msg["id"], {"rows": rows})
+    result: dict[str, Any] = {"rows": rows}
+    if msg["debug"]:
+        result["debug"] = _shape(folders)
+    connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command({
