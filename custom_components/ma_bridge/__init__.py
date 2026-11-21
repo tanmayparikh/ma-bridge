@@ -4,6 +4,8 @@ Exposes two things Home Assistant's Music Assistant integration doesn't:
 
 * ``ma_bridge/recommendations``: the rows on Music Assistant's home page (Quick picks, Listen
   again, mixes...), with each item's artwork as a URL a browser can load.
+* The play queue beyond the next track (``ma_bridge/queue_items``), playing or removing an item
+  in it, and the queue's Autoplay and Crossfade switches (``ma_bridge/queue``, ``queue_set``).
 * An image proxy. Music Assistant serves artwork from its own server, usually plain HTTP on the
   local network, which a dashboard served over HTTPS (or from outside the house) can't load.
   The bridge hands out signed ``/api/ma_bridge/image/...`` links that Home Assistant fetches
@@ -34,20 +36,26 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import CACHE_SECONDS, DATA_SECRET, DOMAIN, IMAGE_PATH, IMAGE_SIZE, MA_DOMAIN, ROW_LIMIT
 
 _LOGGER = logging.getLogger(__name__)
+REGISTERED = f"{DOMAIN}_registered"
 
 try:  # ships with Home Assistant's Music Assistant integration
     from music_assistant_models.helpers import media_from_dict
 except ImportError:  # pragma: no cover
     media_from_dict = None
+try:
+    from music_assistant_models.media_items import MediaItemImage
+except ImportError:  # pragma: no cover
+    MediaItemImage = None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Register the websocket commands and the image view (once per Home Assistant run)."""
-    first = DOMAIN not in hass.data
+    """Register the websocket commands and the image view (once per Home Assistant run: a
+    reloaded entry must not register the image route twice)."""
     hass.data[DOMAIN] = {DATA_SECRET: entry.data[DATA_SECRET]}
-    if first:
-        websocket_api.async_register_command(hass, ws_recommendations)
-        websocket_api.async_register_command(hass, ws_images)
+    if not hass.data.get(REGISTERED):
+        hass.data[REGISTERED] = True
+        for command in (ws_recommendations, ws_images, ws_queue, ws_queue_items, ws_queue_play, ws_queue_remove, ws_queue_set):
+            websocket_api.async_register_command(hass, command)
         hass.http.register_view(ImageView(hass))
     return True
 
@@ -120,6 +128,16 @@ def _image(hass: HomeAssistant, mass, raw: dict[str, Any]) -> str | None:
                 url = mass.get_media_item_image_url(item)
         except Exception:  # noqa: BLE001 - an item without artwork shouldn't break the row
             _LOGGER.debug("No image for %s", raw.get("uri"), exc_info=True)
+    if not url and isinstance(raw.get("image"), dict) and MediaItemImage is not None:
+        # A bare image record (queue items carry one): let the client build its URL.
+        try:
+            image = MediaItemImage.from_dict(raw["image"])
+            try:
+                url = mass.get_image_url(image, size=IMAGE_SIZE)
+            except TypeError:
+                url = mass.get_image_url(image)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("No URL for image %s", raw["image"], exc_info=True)
     if not url:
         # Fall back to a remote image the item already carries.
         images = list((raw.get("metadata") or {}).get("images") or [])
@@ -272,6 +290,141 @@ async def ws_images(hass: HomeAssistant, connection: websocket_api.ActiveConnect
         return
     mass = _mass(hass)
     connection.send_result(msg["id"], {"urls": [browser_url(hass, mass, u) if mass else None for u in msg["urls"]]})
+
+
+# --- Queue ------------------------------------------------------------------------------------
+# A queue's id is its player's id; Home Assistant shows it as the player's `active_queue`.
+
+
+def _ready(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]):
+    """The Music Assistant client, or None after sending the caller an error."""
+    if DOMAIN not in hass.data:
+        connection.send_error(msg["id"], "not_loaded", "Music Assistant Bridge isn't set up")
+        return None
+    mass = _mass(hass)
+    if mass is None:
+        connection.send_error(msg["id"], "not_found", "Music Assistant isn't loaded")
+    return mass
+
+
+def _queue_state(queue: Any) -> dict[str, Any] | None:
+    queue = _plain(queue)
+    if not isinstance(queue, dict):
+        return None
+    keys = ("queue_id", "display_name", "items", "current_index", "shuffle_enabled", "repeat_mode", "crossfade_enabled")
+    state = {k: queue.get(k) for k in keys}
+    # Called dont_stop_the_music_enabled before Music Assistant 2.10.
+    state["autoplay_enabled"] = queue.get("autoplay_enabled", queue.get("dont_stop_the_music_enabled"))
+    return state
+
+
+def _queue_item(hass: HomeAssistant, mass, raw: Any) -> dict[str, Any] | None:
+    raw = _plain(raw)
+    if not isinstance(raw, dict):
+        return None
+    media = _plain(raw.get("media_item"))
+    track = _item(hass, mass, media) if isinstance(media, dict) else None
+    image = (track or {}).get("image")
+    if not image and isinstance(raw.get("image"), dict):
+        image = _image(hass, mass, {"image": raw["image"]})
+    return {
+        "queue_item_id": raw.get("queue_item_id"),
+        "index": raw.get("index"),
+        "name": raw.get("name"),
+        "duration": raw.get("duration"),
+        "available": raw.get("available", True),
+        "track": track,
+        "image": image,
+    }
+
+
+async def _send(connection: websocket_api.ActiveConnection, msg: dict[str, Any], mass, command: str, **kwargs) -> tuple[bool, Any]:
+    """Run a Music Assistant command; on failure tell the caller and return (False, None)."""
+    try:
+        return True, await mass.send_command(command, **kwargs)
+    except Exception as err:  # noqa: BLE001 - report Music Assistant's error to the caller
+        connection.send_error(msg["id"], "music_assistant_error", str(err))
+        return False, None
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ma_bridge/queue", vol.Required("queue_id"): str})
+@websocket_api.async_response
+async def ws_queue(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """A queue's settings and position: length, current index, shuffle, repeat, autoplay, crossfade."""
+    if (mass := _ready(hass, connection, msg)) is None:
+        return
+    ok, queue = await _send(connection, msg, mass, "player_queues/get", queue_id=msg["queue_id"])
+    if ok:
+        connection.send_result(msg["id"], {"queue": _queue_state(queue)})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "ma_bridge/queue_items",
+    vol.Required("queue_id"): str,
+    vol.Optional("offset", default=0): vol.All(int, vol.Range(min=0)),
+    vol.Optional("limit", default=20): vol.All(int, vol.Range(min=1, max=100)),
+})
+@websocket_api.async_response
+async def ws_queue_items(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """A page of the queue, in play order."""
+    if (mass := _ready(hass, connection, msg)) is None:
+        return
+    ok, items = await _send(connection, msg, mass, "player_queues/items", queue_id=msg["queue_id"], limit=msg["limit"], offset=msg["offset"])
+    if ok:
+        connection.send_result(msg["id"], {"items": [i for i in (_queue_item(hass, mass, raw) for raw in items or []) if i]})
+
+
+ITEM = vol.Any(str, int)  # a queue_item_id, or an index in the queue
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ma_bridge/queue_play", vol.Required("queue_id"): str, vol.Required("item"): ITEM})
+@websocket_api.async_response
+async def ws_queue_play(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Jump to an item in the queue."""
+    if (mass := _ready(hass, connection, msg)) is None:
+        return
+    ok, _ = await _send(connection, msg, mass, "player_queues/play_index", queue_id=msg["queue_id"], index=msg["item"])
+    if ok:
+        connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ma_bridge/queue_remove", vol.Required("queue_id"): str, vol.Required("item"): ITEM})
+@websocket_api.async_response
+async def ws_queue_remove(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Take an item out of the queue."""
+    if (mass := _ready(hass, connection, msg)) is None:
+        return
+    ok, _ = await _send(connection, msg, mass, "player_queues/delete_item", queue_id=msg["queue_id"], item_id_or_index=msg["item"])
+    if ok:
+        connection.send_result(msg["id"], {})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "ma_bridge/queue_set",
+    vol.Required("queue_id"): str,
+    vol.Optional("autoplay"): bool,
+    vol.Optional("crossfade"): bool,
+})
+@websocket_api.async_response
+async def ws_queue_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Switch the queue's Autoplay ("don't stop the music") and Crossfade; returns the queue."""
+    if (mass := _ready(hass, connection, msg)) is None:
+        return
+    queue_id = msg["queue_id"]
+    if "autoplay" in msg:
+        try:
+            await mass.send_command("player_queues/autoplay", queue_id=queue_id, autoplay_enabled=msg["autoplay"])
+        except Exception:  # noqa: BLE001 - Music Assistant before 2.10 only has the old name
+            ok, _ = await _send(connection, msg, mass, "player_queues/dont_stop_the_music", queue_id=queue_id, dont_stop_the_music_enabled=msg["autoplay"])
+            if not ok:
+                return
+    if "crossfade" in msg:
+        ok, _ = await _send(connection, msg, mass, "player_queues/crossfade", queue_id=queue_id, crossfade_enabled=msg["crossfade"])
+        if not ok:
+            return
+    ok, queue = await _send(connection, msg, mass, "player_queues/get", queue_id=queue_id)
+    if ok:
+        connection.send_result(msg["id"], {"queue": _queue_state(queue)})
 
 
 # --- Image proxy ------------------------------------------------------------------------------

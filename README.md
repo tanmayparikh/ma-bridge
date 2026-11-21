@@ -66,6 +66,22 @@ Returns `{ "urls": [...] }` in the same order: HTTPS URLs unchanged, Music Assis
 URLs as proxied links, and `null` for anything else. Only Music Assistant's own server is ever
 proxied.
 
+### Queue
+
+A queue's id is its player's id, which Home Assistant shows as the player's `active_queue`
+attribute (for a Music Assistant group, the group's id).
+
+| Command | Fields | Returns |
+|---|---|---|
+| `ma_bridge/queue` | `queue_id` | `{ queue }`: `items` (length), `current_index`, `shuffle_enabled`, `repeat_mode`, `autoplay_enabled`, `crossfade_enabled` |
+| `ma_bridge/queue_items` | `queue_id`, `offset` (0), `limit` (20, max 100) | `{ items }`: `queue_item_id`, `index`, `name`, `duration`, `available`, `track` (as in recommendations), `image` |
+| `ma_bridge/queue_play` | `queue_id`, `item` (queue_item_id or index) | `{}` |
+| `ma_bridge/queue_remove` | `queue_id`, `item` (queue_item_id or index) | `{}` |
+| `ma_bridge/queue_set` | `queue_id`, `autoplay` (bool, optional), `crossfade` (bool, optional) | `{ queue }`, as above |
+
+Autoplay is Music Assistant's "don't stop the music": when the queue runs out it keeps going
+with similar tracks.
+
 ## Image proxy
 
 `GET /api/ma_bridge/image/<signature>?url=<encoded url>` needs no login: the signature (an
